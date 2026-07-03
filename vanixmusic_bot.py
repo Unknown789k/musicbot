@@ -33,7 +33,6 @@ if not API_ID or not API_HASH or not BOT_TOKEN:
     print("❌ ERROR: API_ID, API_HASH, BOT_TOKEN are required!")
     exit(1)
 
-BOT_NAME = "VΛПIΧ MЦSIC BӨƬ"
 BOT_USERNAME = "@vanixmusic_bot"   # change to your bot's username
 
 # ============================================================
@@ -65,7 +64,7 @@ def update_db():
 # 🚀 BOT & USER CLIENTS (separate)
 # ============================================================
 
-# Bot client (handles commands)
+# Bot client (commands)
 bot = Client(
     "vanix_bot",
     api_id=API_ID,
@@ -73,7 +72,7 @@ bot = Client(
     bot_token=BOT_TOKEN,
 )
 
-# User client (for voice chat – uses string session)
+# User client (voice chat)
 if SESSION_STRING:
     user = Client(
         "vanix_user",
@@ -85,7 +84,7 @@ else:
     print("⚠️ WARNING: SESSION_STRING not set! Bot will not join VC.")
     user = None
 
-# PyTgCalls client (needs user client)
+# PyTgCalls client (needs user)
 call = PyTgCalls(user) if user else None
 
 # ============================================================
@@ -166,7 +165,7 @@ async def get_video_info(query: str) -> dict:
     return await loop.run_in_executor(None, extract)
 
 # ============================================================
-# 🎶 PLAYBACK ENGINE (Using MediaStream)
+# 🎶 PLAYBACK ENGINE (MediaStream)
 # ============================================================
 
 async def play_next(chat_id: int):
@@ -230,10 +229,32 @@ async def send_now_playing(chat_id: int, song: dict):
     else:
         await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="html", disable_web_page_preview=True)
 
-# ✅ FIX: Use @call.on_stream_end (without parentheses)
-@call.on_stream_end
-async def stream_end_handler(chat_id: int):
-    await play_next(chat_id)
+# ============================================================
+# 🕵️ MANUAL STREAM MONITOR (Replaces on_stream_end decorator)
+# ============================================================
+
+async def stream_monitor():
+    """Check every 2 seconds if a stream has ended and play next."""
+    while True:
+        await asyncio.sleep(2)
+        if not call:
+            continue
+        
+        # Create a copy of keys to avoid modification during iteration
+        for chat_id in list(current_track.keys()):
+            # If track is supposed to be playing, but call is not active
+            if current_track.get(chat_id) and playing_status.get(chat_id, False):
+                try:
+                    # Check if the chat is still in a call
+                    # If not in call, it means stream ended or stopped
+                    # We will rely on a simple flag: if playing_status is True, 
+                    # we assume it's playing. But we need to check actual status.
+                    # Let's use the fact that if we try to get current stream and it fails,
+                    # we play next.
+                    await call.get_current_call(chat_id)
+                except Exception:
+                    # Not in call or stream ended
+                    await play_next(chat_id)
 
 # ============================================================
 # 🛠️ ADMIN TOOLS
@@ -729,6 +750,9 @@ async def main():
     if call:
         await call.start()
         print("✅ PyTgCalls client started.")
+        # Start the manual stream monitor
+        asyncio.create_task(stream_monitor())
+        print("🔄 Stream monitor started.")
     else:
         print("⚠️ PyTgCalls not started (no user client).")
 
