@@ -16,7 +16,8 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ChatMemberStatus
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types.input_stream import InputAudioStream, InputVideoStreamfrom pytgcalls.exceptions import NoActiveGroupCall
+from pytgcalls.types.input_stream import InputAudioStream, InputVideoStream
+from pytgcalls.exceptions import NoActiveGroupCall
 import yt_dlp
 
 # ============================================================
