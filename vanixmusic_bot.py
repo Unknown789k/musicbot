@@ -16,7 +16,7 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ChatMemberStatus
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import MediaStream   # ✅ YEH IMPORT SAHI HAI
+from pytgcalls.types import MediaStream
 from pytgcalls.exceptions import NoActiveGroupCall
 import yt_dlp
 
@@ -188,7 +188,7 @@ async def play_next(chat_id: int):
 
     try:
         await call.join_call(chat_id)
-        await call.play(chat_id, MediaStream(song['url']))   # ✅ MediaStream
+        await call.play(chat_id, MediaStream(song['url']))
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Error: {e}")
         await play_next(chat_id)
@@ -230,7 +230,8 @@ async def send_now_playing(chat_id: int, song: dict):
     else:
         await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="html", disable_web_page_preview=True)
 
-@call.on_stream_end()
+# ✅ FIX: Use @call.on_stream_end (without parentheses)
+@call.on_stream_end
 async def stream_end_handler(chat_id: int):
     await play_next(chat_id)
 
@@ -540,7 +541,7 @@ async def vplay_command(client: Client, message: Message):
         pass
     try:
         await call.join_call(chat_id)
-        await call.play(chat_id, MediaStream(video_info['url']))   # ✅ MediaStream
+        await call.play(chat_id, MediaStream(video_info['url']))
         current_track[chat_id] = video_info
         playing_status[chat_id] = True
         await msg.edit(f"📺 Now streaming: {video_info['title']}\n\nMake sure Video Call is active!", parse_mode="html")
