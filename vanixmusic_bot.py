@@ -15,12 +15,9 @@ from pyrogram.types import (
     CallbackQuery, ChatPermissions
 )
 from pyrogram.enums import ChatMemberStatus
-
-# New pytgcalls imports (version 3.x)
-from pytgcalls import Client as CallClient, idle
-from pytgcalls.types import MediaStream
+from pytgcalls import PyTgCalls, idle
+from pytgcalls.types import InputAudioStream, InputVideoStream
 from pytgcalls.exceptions import NoActiveGroupCall
-
 import yt_dlp
 
 # ============================================================
@@ -30,7 +27,7 @@ import yt_dlp
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-SESSION_STRING = os.environ.get("SESSION_STRING", "")  # user session for VC
+SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     print("❌ ERROR: API_ID, API_HASH, BOT_TOKEN are required!")
@@ -89,7 +86,7 @@ else:
     user = None
 
 # PyTgCalls client (needs user client)
-call = CallClient(user) if user else None
+call = PyTgCalls(user) if user else None
 
 # ============================================================
 # 📊 GLOBAL STATE
@@ -169,36 +166,29 @@ async def get_video_info(query: str) -> dict:
     return await loop.run_in_executor(None, extract)
 
 # ============================================================
-# 🎶 PLAYBACK ENGINE (using MediaStream)
+# 🎶 PLAYBACK ENGINE
 # ============================================================
 
 async def play_next(chat_id: int):
-    # If loop is on, re-add current track to front of queue
     if loop_status.get(chat_id, False) and chat_id in current_track and current_track[chat_id]:
         queues[chat_id].insert(0, current_track[chat_id])
     
-    # If queue is empty, leave VC
     if not queues.get(chat_id):
         try:
-            await call.leave_group_call(chat_id)
+            await call.leave_call(chat_id)
         except Exception:
             pass
         current_track[chat_id] = {}
         playing_status[chat_id] = False
         return
     
-    # Get next song
     song = queues[chat_id].pop(0)
     current_track[chat_id] = song
     playing_status[chat_id] = True
 
     try:
-        # If not in call, join; else change stream
-        # We'll attempt to change stream, if fails (not in call) then join
-        await call.change_stream(chat_id, MediaStream(song['url']))
-    except NoActiveGroupCall:
-        # Not in VC, so join
-        await call.join_group_call(chat_id, MediaStream(song['url']))
+        await call.join_call(chat_id)
+        await call.play(chat_id, InputAudioStream(song['url']))
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Error: {e}")
         await play_next(chat_id)
@@ -240,13 +230,12 @@ async def send_now_playing(chat_id: int, song: dict):
     else:
         await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="html", disable_web_page_preview=True)
 
-# Stream end event
 @call.on_stream_end()
 async def stream_end_handler(chat_id: int):
     await play_next(chat_id)
 
 # ============================================================
-# 🛠️ ADMIN TOOLS (unchanged, but now use 'bot' client)
+# 🛠️ ADMIN TOOLS
 # ============================================================
 
 async def is_admin(chat_id: int, user_id: int) -> bool:
@@ -518,7 +507,6 @@ async def play_command(client: Client, message: Message):
         return
     if chat_id not in queues:
         queues[chat_id] = []
-    # If nothing is playing, play immediately
     if not current_track.get(chat_id) or not playing_status.get(chat_id, False):
         queues[chat_id].append(song_info)
         await msg.edit(f"▶️ Now playing: {song_info['title']}", parse_mode="html")
@@ -543,16 +531,16 @@ async def vplay_command(client: Client, message: Message):
     except Exception as e:
         await msg.edit(f"❌ Error: {e}", parse_mode="html")
         return
-    # Clear queue and current, then play video
     queues[chat_id] = []
     current_track[chat_id] = {}
     loop_status[chat_id] = False
     try:
-        await call.leave_group_call(chat_id)
+        await call.leave_call(chat_id)
     except:
         pass
     try:
-        await call.join_group_call(chat_id, MediaStream(video_info['url']))
+        await call.join_call(chat_id)
+        await call.play(chat_id, InputVideoStream(video_info['url']))
         current_track[chat_id] = video_info
         playing_status[chat_id] = True
         await msg.edit(f"📺 Now streaming: {video_info['title']}\n\nMake sure Video Call is active!", parse_mode="html")
@@ -589,7 +577,6 @@ async def skip_command(client: Client, message: Message):
     if not current_track.get(chat_id):
         await message.reply("❌ Nothing playing.", parse_mode="html")
         return
-    # Stop current stream and play next
     try:
         await call.stop_stream(chat_id)
     except:
@@ -606,7 +593,7 @@ async def stop_command(client: Client, message: Message):
     current_track[chat_id] = {}
     loop_status[chat_id] = False
     try:
-        await call.leave_group_call(chat_id)
+        await call.leave_call(chat_id)
         await message.reply("⏹ Stopped and left VC", parse_mode="html")
     except Exception as e:
         await message.reply(f"❌ {e}", parse_mode="html")
@@ -699,13 +686,12 @@ async def callback_handler(client: Client, callback: CallbackQuery):
         current_track[chat_id] = {}
         loop_status[chat_id] = False
         try:
-            await call.leave_group_call(chat_id)
+            await call.leave_call(chat_id)
             await callback.answer("⏹ Stopped", show_alert=True)
         except Exception as e:
             await callback.answer(f"Error: {e}", show_alert=True)
         await callback.message.delete()
     elif data == "queue":
-        # Show queue in alert
         if not queues.get(chat_id) and not current_track.get(chat_id):
             await callback.answer("Queue is empty", show_alert=True)
             return
@@ -730,18 +716,15 @@ async def main():
         ✦  P R E M I U M   E D I T I O N  ✦
        ──── ⋆⋅☆⋅⋆ ──── ⋆⋅☆⋅⋆ ────
     """)
-    # Start bot client
     await bot.start()
     print(f"✅ Bot client started as {BOT_USERNAME}")
 
-    # Start user client if available
     if user:
         await user.start()
         print("✅ User client started (String Session).")
     else:
         print("⚠️ User client not started (missing SESSION_STRING). Voice commands will fail.")
 
-    # Start pytgcalls
     if call:
         await call.start()
         print("✅ PyTgCalls client started.")
@@ -751,7 +734,6 @@ async def main():
     print("📊 Bot is running! Commands: /play, /vplay, /ban, /mute, /warn, /promote, /setwelcome")
     await idle()
 
-    # Cleanup
     await bot.stop()
     if user:
         await user.stop()
