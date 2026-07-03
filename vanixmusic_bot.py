@@ -16,8 +16,8 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ChatMemberStatus
 from pytgcalls import PyTgCalls, idle
-# ✅ नया Import (Pure Python Version)
-from pytgcalls.types.input_stream import InputAudioStream, InputVideoStream
+# ✅ सही Import - सीधे types से
+from pytgcalls.types import InputAudioStream, InputVideoStream
 from pytgcalls.exceptions import NoActiveGroupCall
 import yt_dlp
 
@@ -167,7 +167,6 @@ async def play_next(chat_id: int):
     playing_status[chat_id] = True
     try:
         await call.join_call(chat_id)
-        # ✅ यहाँ InputAudioStream का उपयोग
         await call.play(chat_id, InputAudioStream(song['url']))
         await send_now_playing(chat_id, song)
     except Exception as e:
@@ -581,7 +580,6 @@ async def vplay_command(client: Client, message: Message):
         pass
     
     try:
-        # ✅ यहाँ InputVideoStream का उपयोग
         await call.join_call(chat_id, stream=InputVideoStream(video_info['url']))
         await msg.edit(
             f"<b>✧･ﾟ: *✧･ﾟ:*  📺 𝐍𝐎𝐖 𝐕𝐈𝐃𝐄𝐎 𝐒𝐓𝐑𝐄𝐀𝐌𝐈𝐍𝐆  *:･ﾟ✧*:･ﾟ✧</b>\n\n"
