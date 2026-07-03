@@ -16,7 +16,7 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ChatMemberStatus
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import AudioStream, VideoStream   # ✅ FIXED IMPORT
+from pytgcalls.types import MediaStream   # ✅ YEH IMPORT SAHI HAI
 from pytgcalls.exceptions import NoActiveGroupCall
 import yt_dlp
 
@@ -166,7 +166,7 @@ async def get_video_info(query: str) -> dict:
     return await loop.run_in_executor(None, extract)
 
 # ============================================================
-# 🎶 PLAYBACK ENGINE (Using AudioStream / VideoStream)
+# 🎶 PLAYBACK ENGINE (Using MediaStream)
 # ============================================================
 
 async def play_next(chat_id: int):
@@ -188,7 +188,7 @@ async def play_next(chat_id: int):
 
     try:
         await call.join_call(chat_id)
-        await call.play(chat_id, AudioStream(song['url']))   # ✅ FIXED
+        await call.play(chat_id, MediaStream(song['url']))   # ✅ MediaStream
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Error: {e}")
         await play_next(chat_id)
@@ -540,7 +540,7 @@ async def vplay_command(client: Client, message: Message):
         pass
     try:
         await call.join_call(chat_id)
-        await call.play(chat_id, VideoStream(video_info['url']))   # ✅ FIXED
+        await call.play(chat_id, MediaStream(video_info['url']))   # ✅ MediaStream
         current_track[chat_id] = video_info
         playing_status[chat_id] = True
         await msg.edit(f"📺 Now streaming: {video_info['title']}\n\nMake sure Video Call is active!", parse_mode="html")
