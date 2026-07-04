@@ -1,13 +1,16 @@
 """
-✧･ﾟ: *✧･ﾟ:*  VΛПIΧ MЦSIC BӨƬ  *:･ﾟ✧*:･ﾟ✧
-         ⋆⋅☆⋅⋆  Premium Edition  ⋆⋅☆⋅⋆
+✨✨✨ VΛNIX MUSIC - GOD EDITION ✨✨✨
+Premium Music + Management Bot
+Data Railway Persistent Volume में सेव होगा (कभी मिटेगा नहीं)
 """
 
-import asyncio
 import os
+import asyncio
 import json
-from typing import Dict, List
+import random
+import shutil
 from datetime import datetime
+from typing import Dict, List
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -15,13 +18,15 @@ from pyrogram.types import (
     CallbackQuery, ChatPermissions
 )
 from pyrogram.enums import ChatMemberStatus
+
 from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import MediaStream
 from pytgcalls.exceptions import NoActiveGroupCall
+
 import yt_dlp
 
 # ============================================================
-# ⚙️ CONFIGURATION - Environment Variables
+# ⚙️ ENVIRONMENT VARIABLES
 # ============================================================
 
 API_ID = int(os.environ.get("API_ID", 0))
@@ -30,61 +35,59 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    print("❌ ERROR: API_ID, API_HASH, BOT_TOKEN are required!")
+    print("❌ ERROR: API_ID, API_HASH, BOT_TOKEN required!")
     exit(1)
 
-BOT_USERNAME = "@vanixmusic_bot"   # change to your bot's username
-
 # ============================================================
-# 🗄️ DATABASE SETUP
+# 📂 DATA FOLDER (Railway Volume के लिए)
 # ============================================================
 
-DATA_FILE = "data.json"
+# Railway पर Volume Mount करेंगे "/app/data" पर
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+DATA_FILE = os.path.join(DATA_DIR, "data.json")
+
+# ============================================================
+# 🗄️ DATABASE (JSON)
+# ============================================================
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return {"warnings": {}, "welcome": {}}
+    return {"warnings": {}, "welcome": {}, "goodbye": {}, "playlists": {}, "saved": {}, "settings": {}}
 
 def save_data(data):
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 db = load_data()
-warnings = db.get("warnings", {})
-welcome_msgs = db.get("welcome", {})
 
-def update_db():
-    db["warnings"] = warnings
-    db["welcome"] = welcome_msgs
+def get_group_settings(chat_id: str) -> dict:
+    if chat_id not in db.get("settings", {}):
+        db["settings"][chat_id] = {
+            "welcome": None, "goodbye": None,
+            "warn_limit": 3, "warn_action": "mute",
+            "anti_spam": False
+        }
+        save_data(db)
+    return db["settings"][chat_id]
+
+def update_group_settings(chat_id: str, **kwargs):
+    if "settings" not in db:
+        db["settings"] = {}
+    if chat_id not in db["settings"]:
+        db["settings"][chat_id] = {}
+    for key, val in kwargs.items():
+        db["settings"][chat_id][key] = val
     save_data(db)
 
 # ============================================================
-# 🚀 BOT & USER CLIENTS (separate)
+# 🤖 BOT & USER CLIENTS
 # ============================================================
 
-# Bot client (commands)
-bot = Client(
-    "vanix_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-)
-
-# User client (voice chat)
-if SESSION_STRING:
-    user = Client(
-        "vanix_user",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-    )
-else:
-    print("⚠️ WARNING: SESSION_STRING not set! Bot will not join VC.")
-    user = None
-
-# PyTgCalls client (needs user)
+bot = Client("vanix_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+user = Client("vanix_user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING) if SESSION_STRING else None
 call = PyTgCalls(user) if user else None
 
 # ============================================================
@@ -95,35 +98,26 @@ queues: Dict[int, List[dict]] = {}
 current_track: Dict[int, dict] = {}
 loop_status: Dict[int, bool] = {}
 playing_status: Dict[int, bool] = {}
+volume_status: Dict[int, int] = {}
 
 # ============================================================
 # 🎵 YT-DLP HELPERS
 # ============================================================
 
 async def get_audio_info(query: str) -> dict:
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'ytsearch',
-        'extract_flat': False,
-    }
+    ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True, 'default_search': 'ytsearch'}
     loop = asyncio.get_event_loop()
     def extract():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
             if 'entries' in info:
                 info = info['entries'][0]
-            duration = info.get('duration', 0)
-            if duration:
-                mins, secs = divmod(duration, 60)
-                duration_str = f"{mins:02d}:{secs:02d}"
-            else:
-                duration_str = "🔴 Live"
+            dur = info.get('duration', 0)
+            dur_str = f"{dur//60:02d}:{dur%60:02d}" if dur else "🔴 Live"
             return {
                 'title': info.get('title', 'Unknown'),
-                'duration': duration,
-                'duration_str': duration_str,
+                'duration': dur,
+                'duration_str': dur_str,
                 'url': info['url'],
                 'webpage_url': info.get('webpage_url', ''),
                 'thumbnail': info.get('thumbnail', ''),
@@ -133,29 +127,19 @@ async def get_audio_info(query: str) -> dict:
     return await loop.run_in_executor(None, extract)
 
 async def get_video_info(query: str) -> dict:
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'ytsearch',
-        'extract_flat': False,
-    }
+    ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best', 'quiet': True, 'no_warnings': True, 'default_search': 'ytsearch'}
     loop = asyncio.get_event_loop()
     def extract():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
             if 'entries' in info:
                 info = info['entries'][0]
-            duration = info.get('duration', 0)
-            if duration:
-                mins, secs = divmod(duration, 60)
-                duration_str = f"{mins:02d}:{secs:02d}"
-            else:
-                duration_str = "🔴 Live"
+            dur = info.get('duration', 0)
+            dur_str = f"{dur//60:02d}:{dur%60:02d}" if dur else "🔴 Live"
             return {
                 'title': info.get('title', 'Unknown'),
-                'duration': duration,
-                'duration_str': duration_str,
+                'duration': dur,
+                'duration_str': dur_str,
                 'url': info['url'],
                 'webpage_url': info.get('webpage_url', ''),
                 'thumbnail': info.get('thumbnail', ''),
@@ -165,18 +149,29 @@ async def get_video_info(query: str) -> dict:
     return await loop.run_in_executor(None, extract)
 
 # ============================================================
-# 🎶 PLAYBACK ENGINE (MediaStream)
+# 📊 PROGRESS BAR
+# ============================================================
+
+def get_progress_bar(current_sec: int, total_sec: int, length: int = 16) -> str:
+    if total_sec == 0:
+        return "🔴 Live"
+    percent = current_sec / total_sec
+    filled = int(round(length * percent))
+    empty = length - filled
+    return "█" * filled + "▬" * empty
+
+# ============================================================
+# 🎶 PLAYBACK ENGINE
 # ============================================================
 
 async def play_next(chat_id: int):
-    if loop_status.get(chat_id, False) and chat_id in current_track and current_track[chat_id]:
+    if loop_status.get(chat_id, False) and current_track.get(chat_id):
         queues[chat_id].insert(0, current_track[chat_id])
     
     if not queues.get(chat_id):
         try:
             await call.leave_call(chat_id)
-        except Exception:
-            pass
+        except: pass
         current_track[chat_id] = {}
         playing_status[chat_id] = False
         return
@@ -184,80 +179,90 @@ async def play_next(chat_id: int):
     song = queues[chat_id].pop(0)
     current_track[chat_id] = song
     playing_status[chat_id] = True
-
     try:
         await call.join_call(chat_id)
         await call.play(chat_id, MediaStream(song['url']))
+        if chat_id in volume_status:
+            await call.set_volume(chat_id, volume_status[chat_id])
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Error: {e}")
         await play_next(chat_id)
         return
-    
     await send_now_playing(chat_id, song)
 
 async def send_now_playing(chat_id: int, song: dict):
-    duration = song.get('duration_str', 'Unknown')
+    dur = song.get('duration', 0)
+    dur_str = song.get('duration_str', '🔴 Live')
+    vol = volume_status.get(chat_id, 100)
+    q_len = len(queues.get(chat_id, []))
+    bar = get_progress_bar(0, dur, 16) if dur else "🔴 Live"
+    
     text = (
-        f"<b>✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧</b>\n"
-        f"<b>   ⋆⋅☆⋅⋆  𝐍𝐎𝐖 𝐏𝐋𝐀𝐘𝐈𝐍𝐆  ⋆⋅☆⋅⋆</b>\n"
-        f"<b>✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧ ✧</b>\n\n"
-        f"<b>🎵 Title:</b> <a href='{song['webpage_url']}'>{song['title']}</a>\n"
-        f"<b>⏱ Duration:</b> <code>{duration}</code>\n"
-        f"<b>👤 Uploader:</b> {song.get('uploader', 'Unknown')}\n"
-        f"<b>👀 Views:</b> {song.get('view_count', 0):,}\n\n"
-        f"<b>📊 Queue:</b> <code>{len(queues.get(chat_id, []))}</code> songs remaining"
+        f"<b>✨ 𝐍𝐎𝐖 𝐏𝐋𝐀𝐘𝐈𝐍𝐆 ✨</b>\n"
+        f"<b>▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</b>\n\n"
+        f"<b>🎵 {song['title']}</b>\n"
+        f"<b>⏱ {dur_str}</b>\n"
+        f"<b>{bar}</b>\n"
+        f"<b>👤 {song.get('uploader', 'Unknown')}</b>  •  <b>👀 {song.get('view_count', 0):,}</b>\n"
+        f"<b>🔊 {vol}%</b>  •  <b>📊 {q_len}</b> Songs remaining\n"
+        f"<b>▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</b>"
     )
+    
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⏸ 𝐏𝐚𝐮𝐬𝐞", callback_data="pause"),
-            InlineKeyboardButton("▶️ 𝐑𝐞𝐬𝐮𝐦𝐞", callback_data="resume"),
+            InlineKeyboardButton("⏸ Pause", callback_data="pause"),
+            InlineKeyboardButton("▶️ Resume", callback_data="resume"),
+            InlineKeyboardButton("⏭ Skip", callback_data="skip"),
+            InlineKeyboardButton("⏹ Stop", callback_data="stop"),
         ],
         [
-            InlineKeyboardButton("⏭ 𝐒𝐤𝐢𝐩", callback_data="skip"),
-            InlineKeyboardButton("🔁 𝐋𝐨𝐨𝐩", callback_data="loop"),
+            InlineKeyboardButton("🔁 Loop", callback_data="loop"),
+            InlineKeyboardButton("🔀 Shuffle", callback_data="shuffle"),
+            InlineKeyboardButton("📋 Queue", callback_data="queue"),
         ],
         [
-            InlineKeyboardButton("⏹ 𝐒𝐭𝐨𝐩", callback_data="stop"),
-            InlineKeyboardButton("📋 𝐐𝐮𝐞𝐮𝐞", callback_data="queue"),
+            InlineKeyboardButton("🔉 -10s", callback_data="seek_back"),
+            InlineKeyboardButton("🔊 +10s", callback_data="seek_forward"),
+        ],
+        [
+            InlineKeyboardButton("🔉 Vol -", callback_data="vol_down"),
+            InlineKeyboardButton("🔊 Vol +", callback_data="vol_up"),
+        ],
+        [
+            InlineKeyboardButton("💾 Save", callback_data="save_track"),
+            InlineKeyboardButton("📀 Add Playlist", callback_data="add_playlist"),
         ]
     ])
-    if song.get('thumbnail'):
-        try:
+    
+    try:
+        if song.get('thumbnail'):
             await bot.send_photo(chat_id, photo=song['thumbnail'], caption=text, reply_markup=keyboard, parse_mode="html")
-        except Exception:
+        else:
             await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="html", disable_web_page_preview=True)
-    else:
+    except Exception:
         await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="html", disable_web_page_preview=True)
 
 # ============================================================
-# 🕵️ MANUAL STREAM MONITOR (Replaces on_stream_end decorator)
+# 🕵️ STREAM MONITOR
 # ============================================================
 
 async def stream_monitor():
-    """Check every 2 seconds if a stream has ended and play next."""
     while True:
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         if not call:
             continue
-        
-        # Create a copy of keys to avoid modification during iteration
         for chat_id in list(current_track.keys()):
-            # If track is supposed to be playing, but call is not active
             if current_track.get(chat_id) and playing_status.get(chat_id, False):
                 try:
-                    # Check if the chat is still in a call
-                    # If not in call, it means stream ended or stopped
-                    # We will rely on a simple flag: if playing_status is True, 
-                    # we assume it's playing. But we need to check actual status.
-                    # Let's use the fact that if we try to get current stream and it fails,
-                    # we play next.
                     await call.get_current_call(chat_id)
-                except Exception:
-                    # Not in call or stream ended
+                except NoActiveGroupCall:
                     await play_next(chat_id)
+                except Exception:
+                    await play_next(chat_id)
+                    break
 
 # ============================================================
-# 🛠️ ADMIN TOOLS
+# 🛠️ ADMIN CHECK
 # ============================================================
 
 async def is_admin(chat_id: int, user_id: int) -> bool:
@@ -267,405 +272,451 @@ async def is_admin(chat_id: int, user_id: int) -> bool:
     except:
         return False
 
-@bot.on_message(filters.command("ban") & filters.group)
-async def ban_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user's message to ban them.")
-    user_id = message.reply_to_message.from_user.id
-    try:
-        await bot.ban_chat_member(message.chat.id, user_id)
-        await message.reply(f"✅ <b>Banned</b> user.", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
-
-@bot.on_message(filters.command("unban") & filters.group)
-async def unban_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    try:
-        user_id = int(message.command[1]) if len(message.command) > 1 else None
-        if not user_id:
-            return await message.reply("❌ Usage: `/unban user_id`")
-        await bot.unban_chat_member(message.chat.id, user_id)
-        await message.reply(f"✅ <b>Unbanned</b> User ID: `{user_id}`", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
-
-@bot.on_message(filters.command("mute") & filters.group)
-async def mute_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user's message to mute them.")
-    user_id = message.reply_to_message.from_user.id
-    try:
-        await bot.restrict_chat_member(message.chat.id, user_id, ChatPermissions())
-        await message.reply(f"🔇 <b>Muted</b> user.", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
-
-@bot.on_message(filters.command("unmute") & filters.group)
-async def unmute_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user's message to unmute them.")
-    user_id = message.reply_to_message.from_user.id
-    try:
-        perms = ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_send_polls=True,
-            can_change_info=True,
-            can_invite_users=True,
-            can_pin_messages=True
-        )
-        await bot.restrict_chat_member(message.chat.id, user_id, perms)
-        await message.reply(f"🔊 <b>Unmuted</b> user.", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
-
-@bot.on_message(filters.command("warn") & filters.group)
-async def warn_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user's message to warn them.")
-    chat_id = str(message.chat.id)
-    user_id = message.reply_to_message.from_user.id
-    target = message.reply_to_message.from_user.mention
-    if chat_id not in warnings:
-        warnings[chat_id] = {}
-    warnings[chat_id][str(user_id)] = warnings[chat_id].get(str(user_id), 0) + 1
-    count = warnings[chat_id][str(user_id)]
-    update_db()
-    await message.reply(f"⚠️ <b>Warning!</b> {target} ({count}/3)", parse_mode="html")
-    if count >= 3:
-        try:
-            await bot.ban_chat_member(message.chat.id, user_id)
-            await message.reply(f"🚫 {target} banned for 3 warnings!", parse_mode="html")
-            warnings[chat_id][str(user_id)] = 0
-            update_db()
-        except Exception as e:
-            await message.reply(f"❌ Auto-ban failed: {e}")
-
-@bot.on_message(filters.command("unwarn") & filters.group)
-async def unwarn_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user's message to unwarn them.")
-    chat_id = str(message.chat.id)
-    user_id = str(message.reply_to_message.from_user.id)
-    target = message.reply_to_message.from_user.mention
-    if chat_id in warnings and user_id in warnings[chat_id] and warnings[chat_id][user_id] > 0:
-        warnings[chat_id][user_id] -= 1
-        update_db()
-        await message.reply(f"✅ Removed 1 warning from {target}.", parse_mode="html")
-    else:
-        await message.reply(f"ℹ️ {target} has no warnings.", parse_mode="html")
-
-@bot.on_message(filters.command("warns") & filters.group)
-async def warns_command(client: Client, message: Message):
-    chat_id = str(message.chat.id)
-    if not message.reply_to_message:
-        user_id = str(message.from_user.id)
-        count = warnings.get(chat_id, {}).get(user_id, 0)
-        await message.reply(f"📊 <b>Your Warnings:</b> `{count}`", parse_mode="html")
-    else:
-        if not await is_admin(message.chat.id, message.from_user.id):
-            return await message.reply("❌ Only admins can check others.")
-        user_id = str(message.reply_to_message.from_user.id)
-        target = message.reply_to_message.from_user.mention
-        count = warnings.get(chat_id, {}).get(user_id, 0)
-        await message.reply(f"📊 <b>{target}:</b> `{count}` warnings", parse_mode="html")
-
-@bot.on_message(filters.command("setwelcome") & filters.group)
-async def setwelcome_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    chat_id = str(message.chat.id)
-    if message.reply_to_message:
-        if message.reply_to_message.text:
-            welcome_msgs[chat_id] = message.reply_to_message.text
-        elif message.reply_to_message.caption:
-            welcome_msgs[chat_id] = message.reply_to_message.caption
-        else:
-            return await message.reply("❌ Reply to a text message.")
-    else:
-        if len(message.command) < 2:
-            return await message.reply("❌ Usage: `/setwelcome Welcome!`")
-        welcome_msgs[chat_id] = " ".join(message.command[1:])
-    update_db()
-    await message.reply(f"✅ Welcome set.", parse_mode="html")
-
-@bot.on_message(filters.command("delwelcome") & filters.group)
-async def delwelcome_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    chat_id = str(message.chat.id)
-    if chat_id in welcome_msgs:
-        del welcome_msgs[chat_id]
-        update_db()
-        await message.reply("✅ Welcome deleted.", parse_mode="html")
-    else:
-        await message.reply("ℹ️ No welcome set.", parse_mode="html")
-
-@bot.on_message(filters.command("promote") & filters.group)
-async def promote_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user.")
-    user_id = message.reply_to_message.from_user.id
-    target = message.reply_to_message.from_user.mention
-    try:
-        await bot.promote_chat_member(
-            message.chat.id,
-            user_id,
-            can_manage_chat=True,
-            can_change_info=True,
-            can_delete_messages=True,
-            can_invite_users=True,
-            can_pin_messages=True,
-            can_restrict_members=False,
-            can_promote_members=False
-        )
-        await message.reply(f"✅ <b>Promoted</b> {target} (without ban/promote rights).", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
-
-@bot.on_message(filters.command("demote") & filters.group)
-async def demote_command(client: Client, message: Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return await message.reply("❌ You are not an admin!")
-    if not message.reply_to_message:
-        return await message.reply("❌ Reply to a user.")
-    user_id = message.reply_to_message.from_user.id
-    target = message.reply_to_message.from_user.mention
-    try:
-        await bot.promote_chat_member(
-            message.chat.id,
-            user_id,
-            can_manage_chat=False,
-            can_change_info=False,
-            can_delete_messages=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-            can_restrict_members=False,
-            can_promote_members=False
-        )
-        await message.reply(f"✅ <b>Demoted</b> {target}.", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
-
-@bot.on_message(filters.group & filters.new_chat_members)
-async def welcome_new_member(client: Client, message: Message):
-    chat_id = str(message.chat.id)
-    if chat_id in welcome_msgs:
-        for member in message.new_chat_members:
-            if member.id == (await bot.get_me()).id:
-                continue
-            welcome_text = welcome_msgs[chat_id]
-            welcome_text = welcome_text.replace("{name}", member.mention)
-            welcome_text = welcome_text.replace("{username}", f"@{member.username}" if member.username else "No Username")
-            await message.reply(welcome_text, parse_mode="html")
-            break
-
 # ============================================================
 # 🎮 MUSIC COMMANDS
 # ============================================================
 
-@bot.on_message(filters.command("start"))
-async def start_command(client: Client, message: Message):
-    intro_text = (
-        "<b>✧･ﾟ: *✧･ﾟ:*  𝐕𝐀𝐍𝐈𝐗 𝐌𝐔𝐒𝐈𝐂  *:･ﾟ✧*:･ﾟ✧</b>\n"
-        "<b>     ⋆⋅☆⋅⋆  Premium Edition  ⋆⋅☆⋅⋆</b>\n\n"
-        "<b>✦ Telegram's smoothest bot for VC audio & video playback</b>\n\n"
-        "<b>🎧 Features</b>\n"
-        "➤ <b>HD Audio</b> - Crystal-clear sound\n"
-        "➤ <b>HD Video</b> - Perfect playback\n"
-        "➤ <b>Admin Tools</b> - Ban, Mute, Warn, Promote\n"
-        "➤ <b>Zero-Lag Core</b> - Feels fast & easy\n\n"
-        "<b>🚀 Quick Commands</b>\n"
-        "➤ <code>/play &lt;song&gt;</code> - Play audio\n"
-        "➤ <code>/vplay &lt;song&gt;</code> - Stream video\n"
-        "➤ <code>/pause | /resume | /skip | /stop | /loop | /queue</code>\n\n"
-        "<b>🛠️ Admin</b>\n"
-        "➤ <code>/ban | /unban | /mute | /unmute</code>\n"
-        "➤ <code>/warn | /unwarn | /warns</code>\n"
-        "➤ <code>/promote | /demote</code>\n"
-        "➤ <code>/setwelcome | /delwelcome</code>\n\n"
-        "<b>📢 Add me to your group and enjoy!</b>"
-    )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Add to Group", url="https://t.me/vanixmusic_bot?startgroup=true")],
-        [
-            InlineKeyboardButton("💬 Support", url="https://t.me/vanixsupport"),
-            InlineKeyboardButton("👨‍💻 Owner", url="https://t.me/vanixowner"),
-            InlineKeyboardButton("🧑‍💻 Creator", url="https://t.me/vanixcreator"),
-        ]
-    ])
-    await message.reply(intro_text, parse_mode="html", disable_web_page_preview=True, reply_markup=keyboard)
-
 @bot.on_message(filters.command(["play", "p"]))
 async def play_command(client: Client, message: Message):
     if not user or not call:
-        return await message.reply("❌ SESSION_STRING not set. Can't play music.")
+        return await message.reply("❌ SESSION_STRING invalid.")
     if len(message.command) < 2:
-        await message.reply("❌ Usage: `/play song name`", parse_mode="html")
-        return
+        return await message.reply("❌ Usage: `/play song`")
     chat_id = message.chat.id
     query = " ".join(message.command[1:])
-    msg = await message.reply("🔍 Searching...", parse_mode="html")
+    msg = await message.reply("🔍 Searching...")
     try:
-        song_info = await get_audio_info(query)
+        song = await get_audio_info(query)
     except Exception as e:
-        await msg.edit(f"❌ Error: {e}", parse_mode="html")
-        return
+        return await msg.edit(f"❌ {e}")
     if chat_id not in queues:
         queues[chat_id] = []
     if not current_track.get(chat_id) or not playing_status.get(chat_id, False):
-        queues[chat_id].append(song_info)
-        await msg.edit(f"▶️ Now playing: {song_info['title']}", parse_mode="html")
+        queues[chat_id].append(song)
+        await msg.edit(f"▶️ Now: {song['title']}")
         await play_next(chat_id)
     else:
-        position = len(queues[chat_id]) + 1
-        queues[chat_id].append(song_info)
-        await msg.edit(f"✅ Added to queue at position {position}", parse_mode="html")
+        pos = len(queues[chat_id]) + 1
+        queues[chat_id].append(song)
+        await msg.edit(f"✅ Added Queue (#{pos}): {song['title']}")
 
 @bot.on_message(filters.command(["vplay", "vp"]))
 async def vplay_command(client: Client, message: Message):
     if not user or not call:
-        return await message.reply("❌ SESSION_STRING not set. Can't play video.")
+        return await message.reply("❌ SESSION_STRING invalid.")
     if len(message.command) < 2:
-        await message.reply("❌ Usage: `/vplay video name`", parse_mode="html")
-        return
+        return await message.reply("❌ Usage: `/vplay video`")
     chat_id = message.chat.id
     query = " ".join(message.command[1:])
-    msg = await message.reply("🔍 Searching video...", parse_mode="html")
+    msg = await message.reply("🔍 Searching Video...")
     try:
-        video_info = await get_video_info(query)
+        song = await get_video_info(query)
     except Exception as e:
-        await msg.edit(f"❌ Error: {e}", parse_mode="html")
-        return
+        return await msg.edit(f"❌ {e}")
     queues[chat_id] = []
     current_track[chat_id] = {}
     loop_status[chat_id] = False
     try:
         await call.leave_call(chat_id)
-    except:
-        pass
+    except: pass
     try:
         await call.join_call(chat_id)
-        await call.play(chat_id, MediaStream(video_info['url']))
-        current_track[chat_id] = video_info
+        await call.play(chat_id, MediaStream(song['url']))
+        current_track[chat_id] = song
         playing_status[chat_id] = True
-        await msg.edit(f"📺 Now streaming: {video_info['title']}\n\nMake sure Video Call is active!", parse_mode="html")
+        await msg.edit(f"📺 Now Streaming: {song['title']}")
     except Exception as e:
-        await msg.edit(f"❌ Error: {e}\n\nStart a Video Call first!", parse_mode="html")
+        await msg.edit(f"❌ {e}\n\nStart a Video Call first!")
 
-@bot.on_message(filters.command("pause"))
-async def pause_command(client: Client, message: Message):
+@bot.on_message(filters.command(["pause", "resume", "skip", "stop", "loop", "shuffle"]))
+async def control_commands(client: Client, message: Message):
     if not call:
         return
     chat_id = message.chat.id
-    try:
-        await call.pause_stream(chat_id)
-        await message.reply("⏸ Paused", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ {e}", parse_mode="html")
-
-@bot.on_message(filters.command("resume"))
-async def resume_command(client: Client, message: Message):
-    if not call:
-        return
-    chat_id = message.chat.id
-    try:
-        await call.resume_stream(chat_id)
-        await message.reply("▶️ Resumed", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ {e}", parse_mode="html")
-
-@bot.on_message(filters.command(["skip", "next"]))
-async def skip_command(client: Client, message: Message):
-    if not call:
-        return
-    chat_id = message.chat.id
-    if not current_track.get(chat_id):
-        await message.reply("❌ Nothing playing.", parse_mode="html")
-        return
-    try:
-        await call.stop_stream(chat_id)
-    except:
-        pass
-    await play_next(chat_id)
-    await message.reply("⏭ Skipped", parse_mode="html")
-
-@bot.on_message(filters.command(["stop", "end"]))
-async def stop_command(client: Client, message: Message):
-    if not call:
-        return
-    chat_id = message.chat.id
-    queues[chat_id] = []
-    current_track[chat_id] = {}
-    loop_status[chat_id] = False
-    try:
-        await call.leave_call(chat_id)
-        await message.reply("⏹ Stopped and left VC", parse_mode="html")
-    except Exception as e:
-        await message.reply(f"❌ {e}", parse_mode="html")
-
-@bot.on_message(filters.command("loop"))
-async def loop_command(client: Client, message: Message):
-    chat_id = message.chat.id
-    current = loop_status.get(chat_id, False)
-    loop_status[chat_id] = not current
-    status = "ON 🔁" if loop_status[chat_id] else "OFF ➡️"
-    await message.reply(f"🔄 Loop: {status}", parse_mode="html")
+    cmd = message.command[0].lower()
+    if cmd == "pause":
+        try:
+            await call.pause_stream(chat_id)
+            await message.reply("⏸ Paused")
+        except Exception as e:
+            await message.reply(f"❌ {e}")
+    elif cmd == "resume":
+        try:
+            await call.resume_stream(chat_id)
+            await message.reply("▶️ Resumed")
+        except Exception as e:
+            await message.reply(f"❌ {e}")
+    elif cmd == "skip":
+        if not current_track.get(chat_id):
+            return await message.reply("❌ Nothing playing.")
+        await message.reply("⏭ Skipped")
+        try:
+            await call.stop_stream(chat_id)
+        except: pass
+        await play_next(chat_id)
+    elif cmd == "stop":
+        queues[chat_id] = []
+        current_track[chat_id] = {}
+        loop_status[chat_id] = False
+        try:
+            await call.leave_call(chat_id)
+            await message.reply("⏹ Stopped")
+        except Exception as e:
+            await message.reply(f"❌ {e}")
+    elif cmd == "loop":
+        loop_status[chat_id] = not loop_status.get(chat_id, False)
+        await message.reply(f"🔄 Loop: {'ON' if loop_status[chat_id] else 'OFF'}")
+    elif cmd == "shuffle":
+        if not queues.get(chat_id) or len(queues[chat_id]) < 2:
+            return await message.reply("❌ Need 2+ songs in queue.")
+        random.shuffle(queues[chat_id])
+        await message.reply("🔀 Queue Shuffled!")
 
 @bot.on_message(filters.command(["queue", "q"]))
 async def queue_command(client: Client, message: Message):
     chat_id = message.chat.id
     if not queues.get(chat_id) and not current_track.get(chat_id):
-        await message.reply("📭 Queue is empty", parse_mode="html")
-        return
-    text = "<b>✦ QUEUE ✦</b>\n\n"
+        return await message.reply("📭 Queue empty.")
+    text = "<b>📋 QUEUE</b>\n\n"
     if current_track.get(chat_id):
         text += f"▶️ Now: {current_track[chat_id]['title']}\n\n"
-    if queues.get(chat_id):
-        for i, song in enumerate(queues[chat_id][:15], 1):
-            text += f"{i}. {song['title']}\n"
-        if len(queues[chat_id]) > 15:
-            text += f"\n... and {len(queues[chat_id])-15} more"
+    for i, s in enumerate(queues.get(chat_id, [])[:15], 1):
+        text += f"{i}. {s['title']}\n"
     await message.reply(text, parse_mode="html")
 
-@bot.on_message(filters.command("ping"))
-async def ping_command(client: Client, message: Message):
-    start = datetime.now()
-    msg = await message.reply("🏓 Pinging...", parse_mode="html")
-    end = datetime.now()
-    latency = (end - start).microseconds / 1000
-    await msg.edit(f"🏓 Pong!\n⚡ Latency: {latency:.2f}ms", parse_mode="html")
+@bot.on_message(filters.command(["volume", "vol"]))
+async def volume_command(client: Client, message: Message):
+    if not call:
+        return
+    if len(message.command) < 2:
+        return await message.reply("Usage: `/volume 0-200`")
+    try:
+        vol = int(message.command[1])
+        if vol < 0 or vol > 200:
+            return await message.reply("❌ 0 to 200 only.")
+        chat_id = message.chat.id
+        volume_status[chat_id] = vol
+        await call.set_volume(chat_id, vol)
+        await message.reply(f"🔊 Volume: {vol}%")
+    except:
+        await message.reply("❌ Invalid number.")
 
-@bot.on_message(filters.command("help"))
-async def help_command(client: Client, message: Message):
-    await message.reply(
-        f"<b>🎯 Commands</b>\n"
-        f"/play <song> - Play audio\n"
-        f"/vplay <song> - Stream video\n"
-        f"/pause | /resume | /skip | /stop | /loop | /queue\n\n"
-        f"<b>🛠️ Admin</b>\n"
-        f"/ban | /unban | /mute | /unmute\n"
-        f"/warn | /unwarn | /warns\n"
-        f"/promote | /demote\n"
-        f"/setwelcome | /delwelcome",
-        parse_mode="html"
+@bot.on_message(filters.command(["seek"]))
+async def seek_command(client: Client, message: Message):
+    if not call:
+        return
+    if len(message.command) < 2:
+        return await message.reply("Usage: `/seek seconds`")
+    try:
+        seconds = int(message.command[1])
+        chat_id = message.chat.id
+        if not current_track.get(chat_id):
+            return await message.reply("❌ Nothing playing.")
+        song = current_track[chat_id]
+        await call.stop_stream(chat_id)
+        await call.play(chat_id, MediaStream(f"{song['url']}#t={seconds}"))
+        await message.reply(f"⏩ Seeked to {seconds}s")
+    except:
+        await message.reply("❌ Seek failed.")
+
+# ============================================================
+# 📀 PLAYLIST & SAVE (JSON में)
+# ============================================================
+
+@bot.on_message(filters.command("playlist"))
+async def playlist_command(client: Client, message: Message):
+    user_id = str(message.from_user.id)
+    if "playlists" not in db:
+        db["playlists"] = {}
+    if user_id not in db["playlists"]:
+        db["playlists"][user_id] = []
+    songs = db["playlists"][user_id]
+    
+    if len(message.command) < 2:
+        return await message.reply(
+            "📀 **Playlist Commands**\n"
+            "`/playlist add <song>`\n"
+            "`/playlist list`\n"
+            "`/playlist remove <index>`\n"
+            "`/playlist clear`",
+            parse_mode="html"
+        )
+    action = message.command[1].lower()
+    
+    if action == "add":
+        if len(message.command) < 3:
+            return await message.reply("❌ Usage: `/playlist add <song>`")
+        query = " ".join(message.command[2:])
+        msg = await message.reply("🔍 Searching...")
+        try:
+            song = await get_audio_info(query)
+        except Exception as e:
+            return await msg.edit(f"❌ {e}")
+        songs.append(song)
+        save_data(db)
+        await msg.edit(f"✅ Added to Playlist: {song['title']}")
+    
+    elif action == "list":
+        if not songs:
+            return await message.reply("📭 Playlist empty.")
+        text = "📀 **Your Playlist**\n\n"
+        for i, s in enumerate(songs[:30], 1):
+            text += f"{i}. {s['title']} ({s['duration_str']})\n"
+        await message.reply(text, parse_mode="html")
+    
+    elif action == "remove":
+        if len(message.command) < 3:
+            return await message.reply("❌ Usage: `/playlist remove <index>`")
+        try:
+            idx = int(message.command[2]) - 1
+            if idx < 0 or idx >= len(songs):
+                return await message.reply("❌ Invalid index.")
+            removed = songs.pop(idx)
+            save_data(db)
+            await message.reply(f"✅ Removed: {removed['title']}")
+        except:
+            await message.reply("❌ Invalid index.")
+    
+    elif action == "clear":
+        db["playlists"][user_id] = []
+        save_data(db)
+        await message.reply("🗑️ Playlist cleared.")
+
+@bot.on_message(filters.command(["save", "saved"]))
+async def save_commands(client: Client, message: Message):
+    user_id = str(message.from_user.id)
+    if "saved" not in db:
+        db["saved"] = {}
+    if user_id not in db["saved"]:
+        db["saved"][user_id] = []
+    saved = db["saved"][user_id]
+    cmd = message.command[0].lower()
+    
+    if cmd == "save":
+        chat_id = message.chat.id
+        if not current_track.get(chat_id):
+            return await message.reply("❌ Nothing playing.")
+        song = current_track[chat_id]
+        for s in saved:
+            if s['title'] == song['title']:
+                return await message.reply("ℹ️ Already saved.")
+        saved.append(song)
+        save_data(db)
+        await message.reply(f"💾 Saved: {song['title']}")
+    else:  # saved
+        if not saved:
+            return await message.reply("📭 No saved tracks.")
+        text = "📚 **Saved Tracks**\n\n"
+        for i, s in enumerate(saved[:30], 1):
+            text += f"{i}. {s['title']} ({s['duration_str']})\n"
+        await message.reply(text, parse_mode="html")
+
+@bot.on_message(filters.command("remove"))
+async def remove_queue_command(client: Client, message: Message):
+    chat_id = message.chat.id
+    if not queues.get(chat_id):
+        return await message.reply("❌ Queue empty.")
+    if len(message.command) < 2:
+        return await message.reply("Usage: `/remove <index>`")
+    try:
+        idx = int(message.command[1]) - 1
+        if idx < 0 or idx >= len(queues[chat_id]):
+            return await message.reply("❌ Invalid index.")
+        removed = queues[chat_id].pop(idx)
+        await message.reply(f"🗑️ Removed: {removed['title']}")
+    except:
+        await message.reply("❌ Invalid.")
+
+# ============================================================
+# 🛡️ ADMIN MANAGEMENT (JSON based warnings)
+# ============================================================
+
+@bot.on_message(filters.command(["ban", "unban", "mute", "unmute", "kick", "promote", "demote"]))
+async def admin_actions(client: Client, message: Message):
+    if not message.reply_to_message:
+        return await message.reply("❌ Reply to a user.")
+    if not await is_admin(message.chat.id, message.from_user.id):
+        return await message.reply("❌ You are not admin.")
+    
+    chat_id = message.chat.id
+    target = message.reply_to_message.from_user
+    cmd = message.command[0].lower()
+    reason = " ".join(message.command[1:]) or "No reason"
+    
+    try:
+        if cmd == "ban":
+            await bot.ban_chat_member(chat_id, target.id)
+            await message.reply(f"🚫 Banned {target.mention}.\nReason: {reason}")
+        elif cmd == "unban":
+            await bot.unban_chat_member(chat_id, target.id)
+            await message.reply(f"✅ Unbanned {target.mention}.")
+        elif cmd == "kick":
+            await bot.ban_chat_member(chat_id, target.id)
+            await bot.unban_chat_member(chat_id, target.id)
+            await message.reply(f"👢 Kicked {target.mention}.\nReason: {reason}")
+        elif cmd == "mute":
+            await bot.restrict_chat_member(chat_id, target.id, ChatPermissions())
+            await message.reply(f"🔇 Muted {target.mention}.\nReason: {reason}")
+        elif cmd == "unmute":
+            perms = ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
+            await bot.restrict_chat_member(chat_id, target.id, perms)
+            await message.reply(f"🔊 Unmuted {target.mention}.")
+        elif cmd == "promote":
+            await bot.promote_chat_member(chat_id, target.id, can_manage_chat=True, can_change_info=True, can_delete_messages=True, can_invite_users=True, can_pin_messages=True)
+            await message.reply(f"✅ Promoted {target.mention}.")
+        elif cmd == "demote":
+            await bot.promote_chat_member(chat_id, target.id, can_manage_chat=False, can_change_info=False, can_delete_messages=False, can_invite_users=False, can_pin_messages=False)
+            await message.reply(f"✅ Demoted {target.mention}.")
+    except Exception as e:
+        await message.reply(f"❌ Error: {e}")
+
+@bot.on_message(filters.command(["warn", "unwarn", "warns"]))
+async def warn_commands(client: Client, message: Message):
+    chat_id = str(message.chat.id)
+    if "warnings" not in db:
+        db["warnings"] = {}
+    if chat_id not in db["warnings"]:
+        db["warnings"][chat_id] = {}
+    
+    cmd = message.command[0].lower()
+    target = message.reply_to_message.from_user if message.reply_to_message else None
+    target_id = str(target.id) if target else str(message.from_user.id)
+    
+    if cmd == "warns":
+        if target and not await is_admin(int(chat_id), message.from_user.id):
+            return await message.reply("❌ Only admins can check others.")
+        count = db["warnings"][chat_id].get(target_id, 0)
+        await message.reply(f"📊 Warnings: {count}")
+        return
+    
+    if not await is_admin(int(chat_id), message.from_user.id):
+        return await message.reply("❌ You are not admin.")
+    if not message.reply_to_message:
+        return await message.reply("❌ Reply to a user.")
+    
+    reason = " ".join(message.command[1:]) or "No reason"
+    settings = get_group_settings(chat_id)
+    limit = settings.get("warn_limit", 3)
+    
+    if cmd == "warn":
+        db["warnings"][chat_id][target_id] = db["warnings"][chat_id].get(target_id, 0) + 1
+        count = db["warnings"][chat_id][target_id]
+        save_data(db)
+        await message.reply(f"⚠️ Warned {target.mention} ({count}/{limit})\nReason: {reason}")
+        if count >= limit:
+            action = settings.get("warn_action", "mute")
+            try:
+                if action == "mute":
+                    await bot.restrict_chat_member(int(chat_id), target.id, ChatPermissions())
+                elif action == "kick":
+                    await bot.ban_chat_member(int(chat_id), target.id)
+                    await bot.unban_chat_member(int(chat_id), target.id)
+                elif action == "ban":
+                    await bot.ban_chat_member(int(chat_id), target.id)
+                await message.reply(f"🚨 Auto-{action} for {target.mention} (Warn limit reached).")
+                db["warnings"][chat_id][target_id] = 0
+                save_data(db)
+            except Exception as e:
+                await message.reply(f"❌ Auto-action failed: {e}")
+    
+    elif cmd == "unwarn":
+        if db["warnings"][chat_id].get(target_id, 0) > 0:
+            db["warnings"][chat_id][target_id] -= 1
+            save_data(db)
+            await message.reply(f"✅ Removed 1 warning from {target.mention}.")
+        else:
+            await message.reply(f"ℹ️ No warnings for {target.mention}.")
+
+# ============================================================
+# 💬 WELCOME / GOODBYE (JSON में)
+# ============================================================
+
+@bot.on_message(filters.command(["setwelcome", "delwelcome", "setgoodbye", "delgoodbye"]))
+async def welcome_goodbye(client: Client, message: Message):
+    chat_id = str(message.chat.id)
+    if not await is_admin(int(chat_id), message.from_user.id):
+        return await message.reply("❌ You are not admin.")
+    
+    if "welcome" not in db:
+        db["welcome"] = {}
+    if "goodbye" not in db:
+        db["goodbye"] = {}
+    
+    cmd = message.command[0].lower()
+    if cmd == "setwelcome":
+        if message.reply_to_message and message.reply_to_message.text:
+            text = message.reply_to_message.text
+        elif len(message.command) > 1:
+            text = " ".join(message.command[1:])
+        else:
+            return await message.reply("❌ Usage: `/setwelcome Welcome!`")
+        db["welcome"][chat_id] = text
+        save_data(db)
+        await message.reply("✅ Welcome set.")
+    elif cmd == "delwelcome":
+        if chat_id in db["welcome"]:
+            del db["welcome"][chat_id]
+            save_data(db)
+        await message.reply("✅ Welcome deleted.")
+    elif cmd == "setgoodbye":
+        if message.reply_to_message and message.reply_to_message.text:
+            text = message.reply_to_message.text
+        elif len(message.command) > 1:
+            text = " ".join(message.command[1:])
+        else:
+            return await message.reply("❌ Usage: `/setgoodbye Bye!`")
+        db["goodbye"][chat_id] = text
+        save_data(db)
+        await message.reply("✅ Goodbye set.")
+    elif cmd == "delgoodbye":
+        if chat_id in db["goodbye"]:
+            del db["goodbye"][chat_id]
+            save_data(db)
+        await message.reply("✅ Goodbye deleted.")
+
+@bot.on_message(filters.group & filters.new_chat_members)
+async def on_welcome(client: Client, message: Message):
+    chat_id = str(message.chat.id)
+    if chat_id not in db.get("welcome", {}):
+        return
+    for member in message.new_chat_members:
+        if member.id == (await bot.get_me()).id:
+            continue
+        text = db["welcome"][chat_id].replace("{name}", member.mention).replace("{title}", message.chat.title)
+        await message.reply(text, parse_mode="html")
+
+@bot.on_message(filters.group & filters.left_chat_member)
+async def on_goodbye(client: Client, message: Message):
+    chat_id = str(message.chat.id)
+    if chat_id not in db.get("goodbye", {}):
+        return
+    member = message.left_chat_member
+    text = db["goodbye"][chat_id].replace("{name}", member.mention)
+    await message.reply(text, parse_mode="html")
+
+# ============================================================
+# ⚙️ SETTINGS
+# ============================================================
+
+@bot.on_message(filters.command("settings"))
+async def settings_command(client: Client, message: Message):
+    chat_id = str(message.chat.id)
+    if not await is_admin(int(chat_id), message.from_user.id):
+        return await message.reply("❌ You are not admin.")
+    settings = get_group_settings(chat_id)
+    text = (
+        f"<b>⚙️ {message.chat.title} SETTINGS</b>\n\n"
+        f"<b>Welcome:</b> {'✅' if settings.get('welcome') else '❌'}\n"
+        f"<b>Goodbye:</b> {'✅' if settings.get('goodbye') else '❌'}\n"
+        f"<b>Warn Limit:</b> {settings.get('warn_limit', 3)}\n"
+        f"<b>Warn Action:</b> {settings.get('warn_action', 'mute')}\n"
     )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Toggle Welcome", callback_data="settings_welcome")],
+        [InlineKeyboardButton("🔄 Toggle Goodbye", callback_data="settings_goodbye")],
+        [InlineKeyboardButton("⚠️ Set Warn Action", callback_data="settings_warnaction")],
+    ])
+    await message.reply(text, reply_markup=keyboard, parse_mode="html")
 
 # ============================================================
 # 🔘 CALLBACK HANDLER
@@ -674,91 +725,223 @@ async def help_command(client: Client, message: Message):
 @bot.on_callback_query()
 async def callback_handler(client: Client, callback: CallbackQuery):
     if not call:
-        return await callback.answer("Voice client not ready", show_alert=True)
+        return await callback.answer("VC not ready", True)
+    
     chat_id = callback.message.chat.id
+    user_id = callback.from_user.id
     data = callback.data
+    await callback.answer()
+    
+    # Settings
+    if data.startswith("settings_"):
+        action = data.split("_")[1]
+        settings = get_group_settings(str(chat_id))
+        if action == "welcome":
+            current = settings.get("welcome")
+            update_group_settings(str(chat_id), welcome=not current if isinstance(current, bool) else False)
+            await callback.message.edit_text("✅ Toggled Welcome.")
+        elif action == "goodbye":
+            current = settings.get("goodbye")
+            update_group_settings(str(chat_id), goodbye=not current if isinstance(current, bool) else False)
+            await callback.message.edit_text("✅ Toggled Goodbye.")
+        elif action == "warnaction":
+            keyboard = [
+                [InlineKeyboardButton("Mute", callback_data="set_warn_mute")],
+                [InlineKeyboardButton("Kick", callback_data="set_warn_kick")],
+                [InlineKeyboardButton("Ban", callback_data="set_warn_ban")]
+            ]
+            await callback.message.edit_text("Select Warn Action:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    
+    if data.startswith("set_warn_"):
+        action = data.split("_")[2]
+        update_group_settings(str(chat_id), warn_action=action)
+        await callback.message.edit_text(f"✅ Warn Action set to {action.capitalize()}")
+        return
+    
+    # Music Controls
     if data == "pause":
         try:
             await call.pause_stream(chat_id)
-            await callback.answer("⏸ Paused", show_alert=True)
+            await callback.answer("⏸ Paused", True)
         except Exception as e:
-            await callback.answer(f"Error: {e}", show_alert=True)
+            await callback.answer(f"Error: {e}", True)
     elif data == "resume":
         try:
             await call.resume_stream(chat_id)
-            await callback.answer("▶️ Resumed", show_alert=True)
+            await callback.answer("▶️ Resumed", True)
         except Exception as e:
-            await callback.answer(f"Error: {e}", show_alert=True)
+            await callback.answer(f"Error: {e}", True)
     elif data == "skip":
         if current_track.get(chat_id):
+            await callback.answer("⏭ Skipped", True)
             try:
                 await call.stop_stream(chat_id)
-            except:
-                pass
+            except: pass
             await play_next(chat_id)
-            await callback.answer("⏭ Skipped", show_alert=True)
         else:
-            await callback.answer("Nothing playing", show_alert=True)
-    elif data == "loop":
-        current = loop_status.get(chat_id, False)
-        loop_status[chat_id] = not current
-        await callback.answer(f"Loop: {'ON' if loop_status[chat_id] else 'OFF'}", show_alert=True)
+            await callback.answer("Nothing playing", True)
     elif data == "stop":
         queues[chat_id] = []
         current_track[chat_id] = {}
         loop_status[chat_id] = False
         try:
             await call.leave_call(chat_id)
-            await callback.answer("⏹ Stopped", show_alert=True)
+            await callback.answer("⏹ Stopped", True)
         except Exception as e:
-            await callback.answer(f"Error: {e}", show_alert=True)
+            await callback.answer(f"Error: {e}", True)
         await callback.message.delete()
+    elif data == "loop":
+        loop_status[chat_id] = not loop_status.get(chat_id, False)
+        await callback.answer(f"Loop: {'ON' if loop_status[chat_id] else 'OFF'}", True)
+    elif data == "shuffle":
+        if queues.get(chat_id) and len(queues[chat_id]) > 1:
+            random.shuffle(queues[chat_id])
+            await callback.answer("🔀 Shuffled!", True)
+        else:
+            await callback.answer("Need 2+ songs", True)
     elif data == "queue":
-        if not queues.get(chat_id) and not current_track.get(chat_id):
-            await callback.answer("Queue is empty", show_alert=True)
-            return
-        text = "Queue:\n"
+        q = queues.get(chat_id, [])
+        cur = current_track.get(chat_id)
+        if not cur and not q:
+            return await callback.answer("Queue empty", True)
+        text = f"Now: {cur['title']}\n" if cur else ""
+        for i, s in enumerate(q[:5], 1):
+            text += f"{i}. {s['title']}\n"
+        await callback.answer(text, True)
+    elif data == "vol_up":
+        vol = volume_status.get(chat_id, 100) + 10
+        if vol > 200:
+            vol = 200
+        volume_status[chat_id] = vol
+        await call.set_volume(chat_id, vol)
+        await callback.answer(f"🔊 {vol}%", True)
+    elif data == "vol_down":
+        vol = volume_status.get(chat_id, 100) - 10
+        if vol < 0:
+            vol = 0
+        volume_status[chat_id] = vol
+        await call.set_volume(chat_id, vol)
+        await callback.answer(f"🔉 {vol}%", True)
+    elif data == "seek_back":
         if current_track.get(chat_id):
-            text += f"▶️ Now: {current_track[chat_id]['title']}\n"
-        if queues.get(chat_id):
-            for i, song in enumerate(queues[chat_id][:5], 1):
-                text += f"{i}. {song['title']}\n"
-            if len(queues[chat_id]) > 5:
-                text += f"... and {len(queues[chat_id])-5} more"
-        await callback.answer(text, show_alert=True)
+            await callback.answer("⏪ -10s", True)
+            try:
+                await call.stop_stream(chat_id)
+                await call.play(chat_id, MediaStream(current_track[chat_id]['url']))
+            except: pass
+    elif data == "seek_forward":
+        if current_track.get(chat_id):
+            await callback.answer("⏩ +10s", True)
+            try:
+                await call.stop_stream(chat_id)
+                await call.play(chat_id, MediaStream(current_track[chat_id]['url']))
+            except: pass
+    elif data == "save_track":
+        if not current_track.get(chat_id):
+            return await callback.answer("Nothing playing", True)
+        uid = str(user_id)
+        if "saved" not in db:
+            db["saved"] = {}
+        if uid not in db["saved"]:
+            db["saved"][uid] = []
+        song = current_track[chat_id]
+        if any(s['title'] == song['title'] for s in db["saved"][uid]):
+            return await callback.answer("Already saved!", True)
+        db["saved"][uid].append(song)
+        save_data(db)
+        await callback.answer(f"💾 Saved: {song['title']}", True)
+    elif data == "add_playlist":
+        if not current_track.get(chat_id):
+            return await callback.answer("Nothing playing", True)
+        uid = str(user_id)
+        if "playlists" not in db:
+            db["playlists"] = {}
+        if uid not in db["playlists"]:
+            db["playlists"][uid] = []
+        song = current_track[chat_id]
+        db["playlists"][uid].append(song)
+        save_data(db)
+        await callback.answer(f"📀 Added to Playlist: {song['title']}", True)
 
 # ============================================================
-# 🚀 BOT LAUNCH
+# 📢 HELP & START
+# ============================================================
+
+@bot.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    text = (
+        "<b>✨ VΛNIX MUSIC - GOD EDITION ✨</b>\n"
+        "<b>▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</b>\n\n"
+        "🎵 <b>The Ultimate Music + Management Bot</b>\n"
+        "• Crystal Clear Audio & Video\n"
+        "• Personal Playlist (Never Deletes)\n"
+        "• Full Admin Controls\n"
+        "• Beautiful Interactive UI\n\n"
+        "🚀 <b>Try These:</b>\n"
+        "/play - Play audio\n"
+        "/vplay - Play video\n"
+        "/playlist - Your saved songs\n"
+        "/settings - Group settings\n\n"
+        "<b>▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</b>"
+    )
+    await message.reply(text, parse_mode="html")
+
+@bot.on_message(filters.command("help"))
+async def help_command(client: Client, message: Message):
+    text = (
+        "<b>🎯 ALL COMMANDS</b>\n\n"
+        "<b>🎶 Music</b>\n"
+        "/play, /vplay, /pause, /resume, /skip\n"
+        "/stop, /loop, /shuffle, /queue, /remove\n"
+        "/volume, /seek, /save, /saved\n\n"
+        "<b>📀 Playlist</b>\n"
+        "/playlist add, /playlist list\n"
+        "/playlist remove, /playlist clear\n\n"
+        "<b>🛠️ Admin</b>\n"
+        "/ban, /unban, /mute, /unmute, /kick\n"
+        "/promote, /demote, /warn, /unwarn\n"
+        "/setwelcome, /delwelcome, /setgoodbye\n"
+        "/settings\n\n"
+        "<b>ℹ️ Info</b>\n"
+        "/start, /help, /ping"
+    )
+    await message.reply(text, parse_mode="html")
+
+@bot.on_message(filters.command("ping"))
+async def ping_command(client: Client, message: Message):
+    start = datetime.now()
+    msg = await message.reply("🏓 Pinging...")
+    end = datetime.now()
+    await msg.edit(f"🏓 Pong! Latency: {(end-start).microseconds/1000:.2f}ms")
+
+# ============================================================
+# 🚀 MAIN
 # ============================================================
 
 async def main():
-    print("""
-    ✧･ﾟ: *✧･ﾟ:*  VΛПIΧ  MЦSIC  BӨƬ  *:･ﾟ✧*:･ﾟ✧
-       ──── ⋆⋅☆⋅⋆ ──── ⋆⋅☆⋅⋆ ──── 
-        ✦  P R E M I U M   E D I T I O N  ✦
-       ──── ⋆⋅☆⋅⋆ ──── ⋆⋅☆⋅⋆ ────
-    """)
+    print("✨ VΛNIX GOD EDITION STARTING ✨")
+    print(f"📂 Data file path: {DATA_FILE}")
+    
     await bot.start()
-    print(f"✅ Bot client started as {BOT_USERNAME}")
-
+    print("✅ Bot Client Started.")
     if user:
-        await user.start()
-        print("✅ User client started (String Session).")
+        try:
+            await user.start()
+            print("✅ User Client Started.")
+        except Exception as e:
+            print(f"❌ User Client Failed: {e}")
+            return
     else:
-        print("⚠️ User client not started (missing SESSION_STRING). Voice commands will fail.")
-
+        print("⚠️ No SESSION_STRING. Music won't work.")
+    
     if call:
         await call.start()
-        print("✅ PyTgCalls client started.")
-        # Start the manual stream monitor
         asyncio.create_task(stream_monitor())
-        print("🔄 Stream monitor started.")
-    else:
-        print("⚠️ PyTgCalls not started (no user client).")
-
-    print("📊 Bot is running! Commands: /play, /vplay, /ban, /mute, /warn, /promote, /setwelcome")
+        print("✅ PyTgCalls Started.")
+    
+    print("🚀 Bot is LIVE on Railway!")
     await idle()
-
     await bot.stop()
     if user:
         await user.stop()
