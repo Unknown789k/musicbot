@@ -1,14 +1,12 @@
 """
 ✨✨✨ VΛNIX MUSIC - GOD EDITION ✨✨✨
-Premium Music + Management Bot
-Data Railway Persistent Volume में सेव होगा (कभी मिटेगा नहीं)
+(Fixed: Bot runs even if Session fails, Added Inline Buttons, Fixed VC errors)
 """
 
 import os
 import asyncio
 import json
 import random
-import shutil
 from datetime import datetime
 from typing import Dict, List
 
@@ -26,30 +24,26 @@ from pytgcalls.exceptions import NoActiveGroupCall
 import yt_dlp
 
 # ============================================================
-# ⚙️ ENVIRONMENT VARIABLES
+# ⚙️ CONFIG
 # ============================================================
 
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
+BOT_USERNAME = "@vanixmusic_bot"  # अपना बॉट यूजरनेम लिखें
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     print("❌ ERROR: API_ID, API_HASH, BOT_TOKEN required!")
     exit(1)
 
 # ============================================================
-# 📂 DATA FOLDER (Railway Volume के लिए)
+# 📂 DATA
 # ============================================================
 
-# Railway पर Volume Mount करेंगे "/app/data" पर
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "data.json")
-
-# ============================================================
-# 🗄️ DATABASE (JSON)
-# ============================================================
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -65,11 +59,7 @@ db = load_data()
 
 def get_group_settings(chat_id: str) -> dict:
     if chat_id not in db.get("settings", {}):
-        db["settings"][chat_id] = {
-            "welcome": None, "goodbye": None,
-            "warn_limit": 3, "warn_action": "mute",
-            "anti_spam": False
-        }
+        db["settings"][chat_id] = {"welcome": None, "goodbye": None, "warn_limit": 3, "warn_action": "mute"}
         save_data(db)
     return db["settings"][chat_id]
 
@@ -83,15 +73,15 @@ def update_group_settings(chat_id: str, **kwargs):
     save_data(db)
 
 # ============================================================
-# 🤖 BOT & USER CLIENTS
+# 🤖 CLIENTS
 # ============================================================
 
 bot = Client("vanix_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 user = Client("vanix_user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING) if SESSION_STRING else None
-call = PyTgCalls(user) if user else None
+call = None  # Will be initialized only if user starts
 
 # ============================================================
-# 📊 GLOBAL STATE
+# 📊 STATE
 # ============================================================
 
 queues: Dict[int, List[dict]] = {}
@@ -101,7 +91,7 @@ playing_status: Dict[int, bool] = {}
 volume_status: Dict[int, int] = {}
 
 # ============================================================
-# 🎵 YT-DLP HELPERS
+# 🎵 YT-DLP
 # ============================================================
 
 async def get_audio_info(query: str) -> dict:
@@ -149,7 +139,7 @@ async def get_video_info(query: str) -> dict:
     return await loop.run_in_executor(None, extract)
 
 # ============================================================
-# 📊 PROGRESS BAR
+# 🎶 PLAYBACK
 # ============================================================
 
 def get_progress_bar(current_sec: int, total_sec: int, length: int = 16) -> str:
@@ -159,10 +149,6 @@ def get_progress_bar(current_sec: int, total_sec: int, length: int = 16) -> str:
     filled = int(round(length * percent))
     empty = length - filled
     return "█" * filled + "▬" * empty
-
-# ============================================================
-# 🎶 PLAYBACK ENGINE
-# ============================================================
 
 async def play_next(chat_id: int):
     if loop_status.get(chat_id, False) and current_track.get(chat_id):
@@ -184,6 +170,10 @@ async def play_next(chat_id: int):
         await call.play(chat_id, MediaStream(song['url']))
         if chat_id in volume_status:
             await call.set_volume(chat_id, volume_status[chat_id])
+    except NoActiveGroupCall:
+        await bot.send_message(chat_id, "❌ No active voice chat found! Please start a voice chat first.")
+        await play_next(chat_id)
+        return
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Error: {e}")
         await play_next(chat_id)
@@ -243,7 +233,7 @@ async def send_now_playing(chat_id: int, song: dict):
         await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="html", disable_web_page_preview=True)
 
 # ============================================================
-# 🕵️ STREAM MONITOR
+# 🕵️ MONITOR
 # ============================================================
 
 async def stream_monitor():
@@ -278,8 +268,8 @@ async def is_admin(chat_id: int, user_id: int) -> bool:
 
 @bot.on_message(filters.command(["play", "p"]))
 async def play_command(client: Client, message: Message):
-    if not user or not call:
-        return await message.reply("❌ SESSION_STRING invalid.")
+    if not call:
+        return await message.reply("❌ SESSION_STRING invalid or VC not initialized.")
     if len(message.command) < 2:
         return await message.reply("❌ Usage: `/play song`")
     chat_id = message.chat.id
@@ -302,8 +292,8 @@ async def play_command(client: Client, message: Message):
 
 @bot.on_message(filters.command(["vplay", "vp"]))
 async def vplay_command(client: Client, message: Message):
-    if not user or not call:
-        return await message.reply("❌ SESSION_STRING invalid.")
+    if not call:
+        return await message.reply("❌ SESSION_STRING invalid or VC not initialized.")
     if len(message.command) < 2:
         return await message.reply("❌ Usage: `/vplay video`")
     chat_id = message.chat.id
@@ -325,13 +315,15 @@ async def vplay_command(client: Client, message: Message):
         current_track[chat_id] = song
         playing_status[chat_id] = True
         await msg.edit(f"📺 Now Streaming: {song['title']}")
+    except NoActiveGroupCall:
+        await msg.edit("❌ No active voice chat found! Please start a voice chat first.")
     except Exception as e:
         await msg.edit(f"❌ {e}\n\nStart a Video Call first!")
 
 @bot.on_message(filters.command(["pause", "resume", "skip", "stop", "loop", "shuffle"]))
 async def control_commands(client: Client, message: Message):
     if not call:
-        return
+        return await message.reply("❌ VC not ready.")
     chat_id = message.chat.id
     cmd = message.command[0].lower()
     if cmd == "pause":
@@ -420,7 +412,7 @@ async def seek_command(client: Client, message: Message):
         await message.reply("❌ Seek failed.")
 
 # ============================================================
-# 📀 PLAYLIST & SAVE (JSON में)
+# 📀 PLAYLIST & SAVE
 # ============================================================
 
 @bot.on_message(filters.command("playlist"))
@@ -503,7 +495,7 @@ async def save_commands(client: Client, message: Message):
         saved.append(song)
         save_data(db)
         await message.reply(f"💾 Saved: {song['title']}")
-    else:  # saved
+    else:
         if not saved:
             return await message.reply("📭 No saved tracks.")
         text = "📚 **Saved Tracks**\n\n"
@@ -528,7 +520,7 @@ async def remove_queue_command(client: Client, message: Message):
         await message.reply("❌ Invalid.")
 
 # ============================================================
-# 🛡️ ADMIN MANAGEMENT (JSON based warnings)
+# 🛡️ ADMIN
 # ============================================================
 
 @bot.on_message(filters.command(["ban", "unban", "mute", "unmute", "kick", "promote", "demote"]))
@@ -628,7 +620,7 @@ async def warn_commands(client: Client, message: Message):
             await message.reply(f"ℹ️ No warnings for {target.mention}.")
 
 # ============================================================
-# 💬 WELCOME / GOODBYE (JSON में)
+# 💬 WELCOME / GOODBYE
 # ============================================================
 
 @bot.on_message(filters.command(["setwelcome", "delwelcome", "setgoodbye", "delgoodbye"]))
@@ -719,7 +711,7 @@ async def settings_command(client: Client, message: Message):
     await message.reply(text, reply_markup=keyboard, parse_mode="html")
 
 # ============================================================
-# 🔘 CALLBACK HANDLER
+# 🔘 CALLBACK
 # ============================================================
 
 @bot.on_callback_query()
@@ -732,7 +724,6 @@ async def callback_handler(client: Client, callback: CallbackQuery):
     data = callback.data
     await callback.answer()
     
-    # Settings
     if data.startswith("settings_"):
         action = data.split("_")[1]
         settings = get_group_settings(str(chat_id))
@@ -759,7 +750,6 @@ async def callback_handler(client: Client, callback: CallbackQuery):
         await callback.message.edit_text(f"✅ Warn Action set to {action.capitalize()}")
         return
     
-    # Music Controls
     if data == "pause":
         try:
             await call.pause_stream(chat_id)
@@ -865,7 +855,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
         await callback.answer(f"📀 Added to Playlist: {song['title']}", True)
 
 # ============================================================
-# 📢 HELP & START
+# 📢 START, HELP, PING
 # ============================================================
 
 @bot.on_message(filters.command("start"))
@@ -876,16 +866,18 @@ async def start_command(client: Client, message: Message):
         "🎵 <b>The Ultimate Music + Management Bot</b>\n"
         "• Crystal Clear Audio & Video\n"
         "• Personal Playlist (Never Deletes)\n"
-        "• Full Admin Controls\n"
-        "• Beautiful Interactive UI\n\n"
+        "• Full Admin Controls\n\n"
         "🚀 <b>Try These:</b>\n"
         "/play - Play audio\n"
         "/vplay - Play video\n"
         "/playlist - Your saved songs\n"
-        "/settings - Group settings\n\n"
-        "<b>▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</b>"
+        "/settings - Group settings"
     )
-    await message.reply(text, parse_mode="html")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Add to Group", url=f"https://t.me/VanixMusicBot?startgroup=true")],
+        [InlineKeyboardButton("📖 Help", callback_data="help_menu")]
+    ])
+    await message.reply(text, reply_markup=keyboard, parse_mode="html")
 
 @bot.on_message(filters.command("help"))
 async def help_command(client: Client, message: Message):
@@ -916,7 +908,7 @@ async def ping_command(client: Client, message: Message):
     await msg.edit(f"🏓 Pong! Latency: {(end-start).microseconds/1000:.2f}ms")
 
 # ============================================================
-# 🚀 MAIN
+# 🚀 MAIN (FIXED - NO 'return' on User Failure)
 # ============================================================
 
 async def main():
@@ -925,23 +917,25 @@ async def main():
     
     await bot.start()
     print("✅ Bot Client Started.")
-    if user:
+    
+    global call
+    if SESSION_STRING:
         try:
             await user.start()
             print("✅ User Client Started.")
+            call = PyTgCalls(user)
+            await call.start()
+            asyncio.create_task(stream_monitor())
+            print("✅ PyTgCalls Started.")
         except Exception as e:
             print(f"❌ User Client Failed: {e}")
-            return
+            print("⚠️ Bot will run in TEXT-ONLY mode. Music commands will not work.")
     else:
-        print("⚠️ No SESSION_STRING. Music won't work.")
-    
-    if call:
-        await call.start()
-        asyncio.create_task(stream_monitor())
-        print("✅ PyTgCalls Started.")
+        print("⚠️ SESSION_STRING not set. Bot will run in text-only mode.")
     
     print("🚀 Bot is LIVE on Railway!")
     await idle()
+    
     await bot.stop()
     if user:
         await user.stop()
