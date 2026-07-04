@@ -1,1 +1,1 @@
-worker: python vanixmusic_bot.py
+python vanixmusic_bot.py
